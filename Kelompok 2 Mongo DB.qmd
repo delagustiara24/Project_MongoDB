@@ -1,0 +1,846 @@
+---
+title: "Tugas MDS - MongoDB"
+author: "Kelompok 2"
+output: html_document
+editor: visual
+---
+
+## Anggota Kelompok :
+
+Dela Gustiara - M0501241024
+
+Rizka Annisa Mingka - M0501241041
+
+Windi Pangesti -M0501241022
+
+Wildatul Maulidiyah -M0501241091
+
+# Analisis Film IMDb Global 2020–2025 dengan MongoDB dan R
+
+## Menghubungkan Dengan MongoDB
+
+### Memuat Library
+
+```{r}
+library(readxl)
+library(dplyr)
+library(stringr)
+library(tidyverse)
+library(mongolite)
+library(wordcloud)
+library(tm)
+library(RColorBrewer)
+```
+
+Mengimpor berbagai library yang digunakan untuk manipulasi data, koneksi ke MongoDB, dan visualisasi:
+
+-   `readxl`: membaca file Excel
+
+-   `dplyr`, `tidyverse`: manipulasi data
+
+-   `stringr`: pemrosesan string
+
+-   `mongolite`: koneksi ke MongoDB Atlas dan lokal
+
+-   `tm`, `wordcloud`, `RColorBrewer`: untuk membuat word cloud dari judul film
+
+### Membaca dan Menampilkan Data
+
+```{r}
+df <- read_xlsx("Data_20202025.xlsx")
+df
+```
+
+Membaca file Excel berisi data film dan menampilkannya.
+
+### Membersihkan dan Mengubah Data
+
+```{r}
+library(dplyr)
+df_clean <- df %>%
+  mutate(
+    DurationMinutes = ifelse(str_detect(Duration, "h"), as.numeric(str_extract(Duration, "\\d+(?=h)")) * 60, 0) +
+                      ifelse(str_detect(Duration, "m"), as.numeric(str_extract(Duration, "\\d+(?=m)")), 0),
+    VoteClean = Vote %>% str_trim() %>% str_replace_all(",", "."),
+    VoteNumeric = case_when(
+      str_detect(VoteClean, "K") ~ as.numeric(str_remove(VoteClean, "K")) * 1e3,
+      str_detect(VoteClean, "M") ~ as.numeric(str_remove(VoteClean, "M")) * 1e6,
+      TRUE ~ as.numeric(VoteClean)
+    )
+  ) %>%
+  select(Title, Year, DurationMinutes, Rating, VoteNumeric, Category)
+
+
+```
+
+-   Membersihkan dan mengonversi kolom:
+
+    -   `Duration`: Diubah dari jam dan menit ke total menit.
+
+    -   `Vote`: Diubah dari format teks "1.5K", "2M", dll ke angka (`VoteNumeric`)
+
+### Menyimpan Data
+
+```{r}
+write_csv(df_clean, "imdb_global_final.csv")
+```
+
+-   Menyimpan data yang sudah dibersihkan ke file CSV.
+
+### Koneksi ke MongoDB Atlas
+
+```{r}
+# Connect to MongoDB Atlas
+message('Connecting to MongoDB Atlas')
+```
+
+```{r}
+atlas_conn <- mongo(
+  collection = "film_imdb",
+  db = "filmkita",
+  url = "mongodb+srv://wildatulmaulidiyah:Wilda1519*@cluster0.oct4afj.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+)
+
+# Check if connection is working
+if (atlas_conn$count() >= 0) {
+  message("Successfully connected to MongoDB Atlas")
+} else {
+  message("Failed to connect to MongoDB Atlas")
+}
+```
+
+-   `collection = "film_imdb"`: Koleksi atau tabel tempat data akan disimpan.
+
+-   `db = "filmkita"`: Nama database di MongoDB Atlas.
+
+-   `url =`: Alamat koneksi ke cluster MongoDB Atlas yang telah dikonfigurasi dengan akun dan database yang sesuai.
+
+    MongoDB Atlas digunakan agar data dapat disimpan dan diakses secara online melalui cloud.
+
+```{r}
+# Insert data into MongoDB
+message('Inserting data into MongoDB')
+```
+
+```{r}
+insert_result <- atlas_conn$insert(df_clean)
+print(insert_result)
+```
+
+Menyimpan seluruh data `df_clean` ke dalam koleksi di MongoDB Atlas.
+
+```{r}
+retrieved_data <- atlas_conn$find(limit = 5)  # Just get first 5 records as a sample
+print(retrieved_data)
+```
+
+Menyimpan seluruh data `df_clean` ke dalam koleksi di MongoDB Atlas.
+
+### Koneksi MongoDB Lokal
+
+```{r}
+# Koneksi ke MongoDB lokal
+mongo_conn <- mongo(collection = "imdb_global", db = "film_db", url = "mongodb://localhost:27017")
+
+# Hapus koleksi sebelumnya (jika ingin bersih)
+mongo_conn$drop()
+
+# Masukkan data ke MongoDB
+mongo_conn$insert(df_clean)
+mongo_conn$count()
+
+```
+
+-   `collection = "imdb_global"`: Koleksi lokal untuk menyimpan data.
+
+-   `db = "film_db"`: Nama database lokal.
+
+-   `url = "mongodb://localhost:27017"`: Koneksi ke server MongoDB yang berjalan secara lokal di komputer.
+
+```{r}
+# Ambil data dari MongoDB
+df_clean <- mongo_conn$find()
+
+# Pastikan konversi ke numerik
+df_clean$VoteNumeric <- as.numeric(df_clean$VoteNumeric)
+df_clean$Rating <- as.numeric(df_clean$Rating)
+df_clean$DurationMinutes <- as.numeric(df_clean$DurationMinutes)
+
+head(df_clean)
+```
+
+-   `df_clean <- mongo_conn$find():`Perintah ini mengambil seluruh dokumen dari koleksi MongoDB yang terhubung melalui objek `mongo_conn`, lalu menyimpannya dalam bentuk data frame `df_clean` di R.
+
+-   `df_clean$VoteNumeric <- as.numeric(df_clean$VoteNumeric):`Mengubah kolom jumlah suara ke bentuk angka, penting untuk analisis kuantitatif popularitas film.
+
+<!-- -->
+
+-   `df_clean$Rating <- as.numeric(df_clean$Rating):`Mengubah skor rating (biasanya dari IMDb) menjadi nilai numerik untuk dianalisis secara statistik seperti rata-rata atau distribusi.
+
+-   `df_clean$DurationMinutes <- as.numeric(df_clean$DurationMinutes):`Mengubah durasi film ke dalam angka agar dapat dihitung, dirata-ratakan, atau divisualisasikan dalam grafik durasi.
+
+## Mencoba Melakukan Agregasi Data
+
+### Menghitung Rata-rata Rting dan Total Vote Per Tahun
+
+```{r}
+pipeline_avg_rating_vote <- '[
+  {
+    "$group": {
+      "_id": "$Year",
+      "avgRating": { "$avg": "$Rating" },
+      "totalVotes": { "$sum": "$VoteNumeric" },
+      "count": { "$sum": 1 }
+    }
+  },
+  {
+    "$sort": { "_id": 1 }
+  }
+]'
+
+result_avg_rating_vote <- mongo_conn$aggregate(pipeline_avg_rating_vote)
+print(result_avg_rating_vote)
+
+```
+
+Mengelompokkan data berdasarkan tahun (`Year`), menghitung:
+
+-   rata-rata rating film per tahun (`avgRating`),
+
+-   total jumlah vote per tahun (`totalVotes`),
+
+-   jumlah film per tahun (`count`).
+
+Penggunaan agregasi untuk mengetahui tren kualitas dan popularitas film tiap tahun.
+
+### Jumlah Film per Kategori
+
+Menghitung jumlah film untuk tiap kategori (`Category`) dan mengurutkan dari yang paling banyak. Berguna untuk mengetahui kategori film yang paling populer atau paling banyak diproduksi.
+
+```{r}
+pipeline_count_category <- '[
+  {
+    "$group": {
+      "_id": "$Category",
+      "totalFilms": { "$sum": 1 }
+    }
+  },
+  {
+    "$sort": { "totalFilms": -1 }
+  }
+]'
+
+result_count_category <- mongo_conn$aggregate(pipeline_count_category)
+print(result_count_category)
+
+```
+
+### Durasi Film Terlama dan Terpendek per Tahun
+
+Pada bagian ini mencoba untuk mengelompokkan film berdasarkan tahun dan mengambil durasi maksimum (`maxDuration`) dan minimum (`minDuration`) per tahun. Ini berguna untuk melihat variasi durasi film dalam tiap tahun.
+
+### Rata-rata Rating dan Jumlah Vote Per Kategori
+
+```{r}
+pipeline_duration_extremes <- '[
+  {
+    "$group": {
+      "_id": "$Year",
+      "maxDuration": { "$max": "$DurationMinutes" },
+      "minDuration": { "$min": "$DurationMinutes" }
+    }
+  },
+  {
+    "$sort": { "_id": 1 }
+  }
+]'
+
+result_duration_extremes <- mongo_conn$aggregate(pipeline_duration_extremes)
+print(result_duration_extremes)
+
+```
+
+### Rata-rata Rating dan Jumlah Vote Per Kategori
+
+Bagian ini bertujuan untuk mengetahui rata rata rating pada setiap film per kategori dengan mengelompokkan berdasarkan genre (`Category`), menghitung rata-rata rating dan total vote serta jumlah film per genre. Hasil ini membantu mengetahui genre film dengan rating terbaik dan jumlah vote terbanyak.
+
+```{r}
+pipeline_avg_rating_vote_category <- '[
+  {
+    "$group": {
+      "_id": "$Category",
+      "avgRating": { "$avg": "$Rating" },
+      "totalVotes": { "$sum": "$VoteNumeric" },
+      "count": { "$sum": 1 }
+    }
+  },
+  {
+    "$sort": { "avgRating": -1 }
+  }
+]'
+
+result_avg_rating_vote_category <- mongo_conn$aggregate(pipeline_avg_rating_vote_category)
+print(result_avg_rating_vote_category)
+
+```
+
+Top 5 Film dengan Rating Tertinggi per Tahun
+
+Berdasarkan hasil agregasi yang telah dilakukan, berikut merupakan syntax untuk mengurutkan film berdasarkan tahun dan rating tertinggi, lalu mengelompokkan per tahun dan mengambil 5 film terbaik. Mempermudah menemukan film top di setiap tahun.
+
+## Visualisasi Data
+
+```{r}
+pipeline_top5_rating_per_year <- '[
+  {
+    "$sort": { "Year": 1, "Rating": -1 }
+  },
+  {
+    "$group": {
+      "_id": "$Year",
+      "topFilms": {
+        "$push": { "Title": "$Title", "Rating": "$Rating", "VoteNumeric": "$VoteNumeric" }
+      }
+    }
+  },
+  {
+    "$project": {
+      "topFilms": { "$slice": ["$topFilms", 5] }
+    }
+  }
+]'
+
+result_top5_rating_per_year <- mongo_conn$aggregate(pipeline_top5_rating_per_year)
+print(result_top5_rating_per_year)
+
+```
+
+## Visualisasi Data
+
+### Top 5 Film Berdasarkan Rating
+
+```{r}
+df_clean %>%
+  arrange(desc(Rating)) %>%
+  slice_head(n = 5) %>%
+  ggplot(aes(x = reorder(Title, Rating), y = Rating, fill = Title)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = Rating), vjust = -0.5) +
+  labs(title = "Top 5 Film Berdasarkan Rating", x = "Judul Film", y = "Rating") +
+  coord_flip() +
+  theme_minimal()
+
+
+```
+
+Interpretasi:
+
+Plot "Top 5 Film Berdasarkan Rating" menampilkan lima film dengan penilaian tertinggi dari penonton. *Guru Nanak Jahaz* menempati peringkat pertama dengan rating 9.4, diikuti *Attack on Titan the Movie: The Last Attack* (9.2) dan *Solo Leveling: ReAwakening* (8.8), menunjukkan dominasi film animasi dan aksi. Sementara itu, *Ocean with David Attenborough* dan *12th Fail* sama-sama meraih 8.7, membuktikan bahwa dokumenter edukatif dan drama inspiratif juga mendapat apresiasi tinggi. Grafik ini mencerminkan keragaman genre yang diminati penonton, mulai dari animasi hingga dokumenter, serta menunjukkan minat yang semakin luas terhadap berbagai bentuk narasi, baik hiburan maupun edukatif.
+
+### Top 5 Film Berdasarkan Jumlah Vote
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(scales)
+df_clean %>%
+  arrange(desc(VoteNumeric)) %>%
+  slice_head(n = 5) %>%
+  ggplot(aes(x = reorder(Title, VoteNumeric), y = VoteNumeric, fill = Title)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = comma(VoteNumeric)), 
+            hjust = -0.1, 
+            clip = "off") +  # mencegah pemotongan label
+  labs(
+    title = "Top 5 Film Berdasarkan Jumlah Vote",
+    x = "Judul Film",
+    y = "Jumlah Vote"
+  ) +
+  coord_flip(clip = "off") +  # penting agar teks bisa keluar dari area panel
+  theme_minimal() +
+  theme(
+    plot.margin = margin(5.5, 30, 5.5, 5.5)  # tambah margin kanan
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15)))  # beri ruang di ujung kanan
+
+```
+
+Interpretasi:
+
+Plot "Top 5 Film Berdasarkan Jumlah Vote" menunjukkan film-film dengan popularitas tertinggi berdasarkan partisipasi penonton. *Dune: Part One* dan *Spider-Man: No Way Home* menempati posisi teratas dengan jumlah vote hampir sejajar, menunjukkan antusiasme tinggi. *Oppenheimer*, *The Batman*, dan *Top Gun: Maverick* juga meraih vote signifikan, mencerminkan daya tarik film bertema sejarah, superhero, dan aksi klasik.
+
+Jika dibandingkan dengan plot "Top 5 Film Berdasarkan Rating", terlihat perbedaan antara film dengan rating tinggi dan film dengan jumlah vote terbanyak. Film seperti *Guru Nanak Jahaz* dan *Solo Leveling* mendapat rating tinggi namun tidak muncul dalam daftar vote terbanyak, menandakan apresiasi kualitas oleh segmen tertentu. Sebaliknya, film-film dengan jumlah vote tinggi lebih mencerminkan daya jangkau luas dan popularitas massal. Hal ini menegaskan bahwa film yang paling disukai belum tentu yang paling banyak ditonton, dan sebaliknya.
+
+### Boxplot Sebaran Durasi Film
+
+```{r}
+ggplot(df_clean, aes(y = DurationMinutes)) +
+  geom_boxplot(fill = "#FF7F0E") +
+  labs(title = "Sebaran Durasi Film (Menit)", y = "Durasi (menit)") +
+  theme_minimal()
+
+```
+
+Interpretasi:
+
+Boxplot berjudul "Sebaran Durasi Film (Menit)" menggambarkan distribusi panjang film yang umumnya berkisar antara 100 hingga 130 menit, dengan nilai tengah (median) berada di sekitar 110 menit. Ini menunjukkan bahwa sebagian besar film memiliki durasi sekitar 1,5 hingga 2 jam, yang merupakan standar umum dalam industri perfilman. Di luar rentang ini, terdapat beberapa outlier, yakni film-film dengan durasi sangat panjang hingga lebih dari 240 menit, serta satu film berdurasi sangat pendek yang mendekati 0 menit. Kehadiran outlier ini mencerminkan bahwa meskipun mayoritas film mengikuti pola durasi konvensional, ada juga film-film yang menawarkan pengalaman menonton di luar kebiasaan, baik berupa film pendek maupun epik berdurasi panjang. Sebaran yang sedikit condong ke atas juga menunjukkan bahwa variasi durasi lebih besar terjadi pada film-film yang berdurasi panjang dibandingkan yang berdurasi pendek.
+
+### Top 3 Film Berdurasi Terlama
+
+```{r}
+df_clean %>%
+  arrange(desc(DurationMinutes)) %>%
+  slice_head(n = 3) %>%
+  ggplot(aes(x = reorder(Title, DurationMinutes), y = DurationMinutes, fill = Title)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = paste0(DurationMinutes, " min")), hjust = -0.1, clip = "off") +
+  labs(title = "3 Film dengan Durasi Terlama", x = "Judul Film", y = "Durasi (menit)") +
+  coord_flip(clip = "off") +
+  theme_minimal() +
+  theme(plot.margin = margin(5.5, 30, 5.5, 5.5)) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15)))
+
+```
+
+Interpretasi:
+
+Plot "3 Film dengan Durasi Terlama" menunjukkan tiga film yang memiliki waktu tayang paling panjang dalam daftar. Di posisi teratas adalah *Zack Snyder's Justice League* dengan durasi luar biasa mencapai 242 menit (lebih dari 4 jam), menjadikannya sebagai film dengan durasi terlama. Film ini memang dikenal sebagai versi penyutradaraan ulang yang jauh lebih panjang dibanding versi aslinya.
+
+Di bawahnya, terdapat *The Brutalist* dengan durasi 216 menit, dan *Killers of the Flower Moon* dengan 206 menit. Kedua film ini juga menampilkan narasi mendalam dan cenderung kompleks, yang membutuhkan waktu tayang lebih lama untuk mengembangkan cerita secara utuh.
+
+Secara keseluruhan, visualisasi ini menyoroti bahwa meskipun film berdurasi panjang cenderung jarang, mereka tetap memiliki tempat tersendiri dalam industri perfilman terutama untuk karya-karya dengan tema serius, narasi mendalam, atau versi director’s cut yang ingin memberikan pengalaman sinematik lebih lengkap kepada penonton.
+
+### Korelasi Rating dengan Jumlah Vote
+
+```{r}
+ggplot(df_clean, aes(x = VoteNumeric, y = Rating)) +
+  geom_point(alpha = 0.6, color = "blue") +
+  geom_smooth(method = "lm", se = FALSE, color = "black") +
+  labs(title = "Korelasi Rating dan Jumlah Vote", x = "Jumlah Vote", y = "Rating") +
+  theme_minimal()
+
+```
+
+Interpretasi:
+
+Plot “Korelasi Rating dan Jumlah Vote” menunjukkan hubungan antara rating film dan jumlah suara (vote) yang diberikan oleh penonton. Titik-titik biru merepresentasikan film individual, sedangkan garis hitam menunjukkan tren umum hubungan antara kedua variabel. Secara keseluruhan, terlihat korelasi positif lemah: semakin banyak vote yang diterima sebuah film, cenderung semakin tinggi pula ratingnya, meskipun tidak mutlak. Sebagian besar film berada pada rentang vote rendah (di bawah 100.000), dengan rating bervariasi antara 5 hingga 8. Namun, film-film dengan jumlah vote sangat tinggi (lebih dari 500.000) umumnya memiliki rating di atas rata-rata, yakni sekitar 7 ke atas. Hal ini mengindikasikan bahwa film yang populer atau banyak ditonton juga cenderung disukai oleh penonton secara umum.
+
+Meski demikian, sebaran data cukup menyebar, terutama pada film dengan sedikit vote yang memiliki rating sangat bervariasi, dari sangat rendah hingga sangat tinggi. Ini menunjukkan bahwa rating pada film dengan sedikit vote mungkin kurang stabil atau representatif. Dengan kata lain, film dengan basis penonton yang lebih besar cenderung memiliki rating yang lebih konsisten dan sedikit lebih tinggi. Korelasi ini penting untuk dipahami, terutama dalam konteks menilai kualitas film berdasarkan popularitas dan keterlibatan audiens
+
+### Korelasi Durasi dengan Rating
+
+```{r}
+ggplot(df_clean, aes(x = DurationMinutes, y = Rating)) +
+  geom_point(alpha = 0.6, color = "darkgreen") +
+  geom_smooth(method = "lm", se = FALSE, color = "black") +
+  labs(title = "Korelasi Durasi dan Rating", x = "Durasi (menit)", y = "Rating") +
+  theme_minimal()
+
+```
+
+Interpretasi:
+
+Berdasarkan plot yang ditampilkan, terlihat adanya hubungan positif antara durasi film (dalam menit) dan rating film, yang ditunjukkan oleh garis tren yang menaik. Artinya, secara umum, film dengan durasi yang lebih panjang cenderung memiliki rating yang lebih tinggi dibandingkan dengan film berdurasi pendek. Namun, pola penyebaran titik-titik data yang cukup menyebar dari garis tren menunjukkan bahwa hubungan ini tidak terlalu kuat. Banyak film berdurasi pendek yang memiliki rating tinggi, begitu juga sebaliknya, menunjukkan adanya variabilitas yang tinggi pada data. Oleh karena itu, meskipun arah hubungan bersifat positif, kekuatan korelasinya tergolong lemah. Hal ini mengindikasikan bahwa durasi film bukanlah satu-satunya atau faktor utama yang memengaruhi penilaian rating sebuah film, dan kemungkinan terdapat faktor-faktor lain yang lebih dominan dalam menentukan rating.
+
+### Heatmap Korelasi Variabel Numerik
+
+```{r}
+library(corrplot)
+
+# Ambil hanya variabel numerik
+num_data <- df_clean %>%
+  select(DurationMinutes, Rating, VoteNumeric) %>%
+  na.omit()
+
+# Buat matriks korelasi
+cor_matrix <- cor(num_data)
+
+# Tampilkan heatmap penuh
+corrplot(cor_matrix, method = "color", type = "full",
+         addCoef.col = "black",        # tampilkan nilai korelasi
+         tl.cex = 1,                   # ukuran label
+         number.cex = 0.9,             # ukuran angka korelasi
+         col = colorRampPalette(c("blue", "white", "red"))(200))
+
+
+```
+
+Interpretasi:
+
+Berdasarkan matriks korelasi Pearson, terdapat hubungan positif antara durasi film (`DurationMinutes`), rating (`Rating`), dan jumlah suara (`VoteNumeric`). Korelasi antara durasi dan rating sebesar 0.32 menunjukkan hubungan positif lemah, artinya film berdurasi lebih panjang cenderung memiliki rating sedikit lebih tinggi. Korelasi antara durasi dan jumlah suara sebesar 0.40 menunjukkan hubungan positif sedang, mengindikasikan film berdurasi panjang cenderung mendapat lebih banyak suara. Sementara itu, korelasi antara rating dan jumlah suara sebesar 0.30 juga menunjukkan hubungan positif lemah. Secara keseluruhan, hubungan antar ketiga variabel bersifat positif namun tidak terlalu kuat, sehingga analisis lebih lanjut diperlukan untuk memahami faktor lain yang memengaruhi rating dan popularitas film.
+
+### Rata-rata Rating film per Tahun
+
+```{r}
+df_clean %>%
+  group_by(Year) %>%
+  summarise(RataRating = mean(Rating, na.rm = TRUE)) %>%
+  ggplot(aes(x = factor(Year), y = RataRating)) +
+  geom_col(fill = "#008080") +
+  geom_text(aes(label = round(RataRating, 2)), vjust = -0.5, size = 3) +
+  labs(title = "Rata-rata Rating Film per Tahun", x = "Tahun", y = "Rating") +
+  theme_minimal()
+
+```
+
+Interpretasi:
+
+Berdasarkan grafik, rata-rata rating film tertinggi terjadi pada tahun 2020 dan 2021, masing-masing sebesar 6.70 dan 6.67. Kenaikan ini dapat dikaitkan dengan pandemi COVID-19 yang terjadi secara global. Selama masa pandemi, banyak orang menghabiskan waktu di rumah dan mengonsumsi lebih banyak film melalui platform digital, sehingga film-film yang dirilis cenderung lebih terkurasi, berkualitas tinggi, atau memiliki perhatian lebih dari penonton, yang berkontribusi pada rating yang tinggi. Pada tahun 2022 dan 2023, meskipun pandemi mulai mereda, rata-rata rating sedikit menurun namun masih berada di kisaran yang relatif stabil (sekitar 6.6). Hal ini mungkin mencerminkan transisi industri film dari produksi terbatas selama pandemi ke produksi normal kembali, di mana banyak film mulai dirilis kembali secara massal.Penurunan signifikan terjadi pada tahun 2024 dan 2025, dengan rata-rata rating turun menjadi 6.39 dan 6.24. Penurunan ini bisa mencerminkan meningkatnya volume film yang dirilis pasca-pandemi, termasuk banyak produksi dengan kualitas yang bervariasi. Selain itu, ekspektasi penonton yang meningkat seiring kebangkitan industri hiburan bisa menyebabkan penilaian menjadi lebih kritis, sehingga memengaruhi rating secara keseluruhan.
+
+Secara keseluruhan, tren ini menunjukkan bahwa dinamika global dan industri film berpengaruh terhadap penilaian penonton, dengan pandemi memberikan dampak signifikan pada persepsi dan konsumsi film dalam beberapa tahun terakhir.
+
+### Jumlah Film Rilis Per Tahun
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+# Hitung jumlah film per tahun
+film_per_tahun <- df_clean %>%
+  group_by(Year) %>%
+  summarise(Jumlah = n())
+
+# Plot batang jumlah film per tahun
+ggplot(film_per_tahun, aes(x = factor(Year), y = Jumlah, fill = factor(Year))) +
+  geom_col(width = 0.6) +
+  geom_text(aes(label = Jumlah), vjust = -0.5, fontface = "bold") +
+  scale_fill_manual(values = c("2020" = "#00d9ff",
+                               "2021" = "#27c3ff",
+                               "2022" = "#54a5f7",
+                               "2023" = "#7870f9",
+                               "2024" = "#a051d6",
+                               "2025" = "#cf2a87")) +
+  labs(
+    title = "Jumlah Film Rilis per Tahun",
+    x = NULL,
+    y = NULL
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(face = "bold"),
+    axis.text.y = element_text(face = "bold"),
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    panel.grid.minor = element_blank()
+  )
+
+```
+
+Interpretasi:
+
+Grafik menunjukkan bahwa jumlah film yang dirilis terus meningkat dari tahun 2020 hingga 2024, dengan pertumbuhan yang sangat signifikan. Dimulai dari 34 film pada tahun 2020, jumlah ini melonjak menjadi 209 film pada 2024, yang menjadi puncak tertinggi dalam lima tahun terakhir. Kenaikan ini mencerminkan tren pertumbuhan industri film yang positif, didorong oleh pemulihan pasca-pandemi, peningkatan permintaan penonton, dan ekspansi platform distribusi digital.
+
+Sementara itu, jumlah film yang tercatat pada tahun 2025 telah mencapai 150, meskipun tahun tersebut belum selesai. Fakta ini menunjukkan bahwa tren positif kemungkinan besar akan berlanjut, dan angka akhir tahun berpotensi mendekati atau bahkan melampaui tahun 2024. Dengan demikian, data ini tidak hanya mencerminkan kebangkitan industri film, tetapi juga mengindikasikan momentum yang stabil menuju masa depan yang lebih produktif dan kompetitif dalam dunia perfilman.
+
+### Film dengan Vote Tertinggi Per Tahun
+
+```{r}
+df_clean %>%
+  group_by(Year) %>%
+  slice_max(order_by = VoteNumeric, n = 1, with_ties = FALSE) %>%
+  ggplot(aes(x = factor(Year), y = VoteNumeric, fill = Title)) +
+  geom_col() +
+  geom_text(aes(label = Title), vjust = -0.5, angle = 20, size = 2.5) +
+  labs(title = "Film dengan Vote Tertinggi per Tahun", x = "Tahun", y = "Jumlah Vote") +
+  theme_minimal()
+
+```
+
+Interpretasi:
+
+Grafik menunjukkan bahwa setiap tahun dari 2020 hingga 2025 memiliki film unggulan dengan jumlah vote tertinggi yang mencerminkan kondisi dan respons publik saat itu. Pada 2020, *Tenet* berhasil meraih sekitar 650.000 vote meski dirilis di tengah pandemi, karena minimnya film besar dan reputasi Christopher Nolan. Tahun 2021 menjadi puncak dengan hampir 1 juta vote untuk *Dune: Part One*, berkat adaptasi novel legendaris dan strategi rilis ganda. Tahun berikutnya, *The Batman* (2022) mencatat sekitar 875.000 vote karena pendekatan baru yang lebih gelap dan detektif-sentris. *Oppenheimer* (2023) menyusul dengan 900.000 vote berkat tema sejarah dan daya tarik Nolan. Namun, *Dune: Part Two* (2024) mengalami penurunan ke 650.000 vote, diduga karena kejenuhan sekuel dan persaingan ketat. Terakhir, *Snow White* (2025) hanya meraih sekitar 400.000, hal tersebut dipicu oleh kontroversi seputar casting yang dianggap jauh dari versi klasik serta kritik dari penonton terhadap arah baru disney dalam mengaptasi dongeng lama.
+
+### Jumlah Film per Kategori Usia
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+df_clean %>%
+  filter(!is.na(Category)) %>%
+  count(Category) %>%
+  ggplot(aes(x = reorder(Category, -n), y = n, fill = Category)) +  # urutan menurun
+  geom_col() +
+  geom_text(aes(label = n), vjust = -0.5, size = 4) +  # label di atas batang
+  labs(title = "Jumlah Film per Kategori Usia", x = NULL, y = "Jumlah") +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "top",
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  ) +
+  scale_fill_brewer(palette = "Paired") +  # gunakan palet warna yang berbeda
+  ylim(0, max(df_clean %>% count(Category) %>% pull(n)) + 20)  # beri ruang untuk teks
+
+
+```
+
+Interpretasi:
+
+Grafik “Jumlah Film per Kategori Usia” menunjukkan distribusi film berdasarkan klasifikasi usia. Kategori R (Restricted) mendominasi dengan 302 film, menunjukkan bahwa mayoritas film ditujukan untuk penonton dewasa karena konten yang mungkin mengandung kekerasan, bahasa kasar, atau tema sensitif. Di posisi kedua adalah PG-13 dengan 150 film, yang cocok untuk remaja dan dewasa muda, diikuti oleh PG sebanyak 43 film, yang relatif ramah untuk keluarga.Kategori lainnya seperti Not Rated (20 film) dan TV-MA (19 film) juga muncul, menandakan adanya film yang tidak diklasifikasikan secara resmi atau ditujukan untuk audiens dewasa pada platform televisi/streaming. Kategori seperti TV-14, Unrated, dan TV-PG memiliki jumlah jauh lebih sedikit. Sementara itu, kategori usia ketat seperti NC-17 dan 16+ hanya muncul masing-masing 1 film, menandakan sangat sedikit film yang dibuat untuk kelompok usia yang sangat terbatas. Secara keseluruhan, grafik ini mengindikasikan bahwa industri film lebih banyak memproduksi konten untuk penonton dewasa daripada untuk keluarga atau anak-anak. Hal ini bisa mencerminkan minat pasar, kebebasan kreatif sineas, serta tren konsumsi film yang lebih condong ke genre serius dan dewasa.
+
+### Rata-rata Rating per Kategori Usia
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+df_clean %>%
+  group_by(Category) %>%
+  summarise(RataRating = mean(Rating, na.rm = TRUE)) %>%
+  ggplot(aes(x = reorder(Category, -RataRating), y = RataRating)) +  # Urut descending
+  geom_col(fill = "#DC143C") +
+  geom_text(aes(label = round(RataRating, 2)), hjust = -0.1, size = 2.5) +
+  labs(title = "Rata-Rata Rating per Kategori Usia", x = "Kategori", y = "Rating") +
+  coord_flip() +
+  theme_minimal()
+
+
+```
+
+Interpretasi:
+
+Grafik tersebut menunjukkan rata-rata rating tayangan berdasarkan kategori usia. Tayangan dengan klasifikasi TV-PG memiliki rating tertinggi (7.57), diikuti oleh Unrated dan PG, yang menandakan bahwa tayangan dengan konten ringan atau untuk semua umur lebih disukai penonton. Sebaliknya, kategori usia dewasa seperti TV-MA dan NC-17 justru memiliki rating terendah, mengindikasikan bahwa tayangan dengan konten berat tidak selalu mendapat respons positif. Sementara itu, kategori NA dan Not Rated tetap memperoleh rating cukup baik. Secara umum, tayangan dengan jangkauan audiens yang lebih luas dan konten ramah keluarga cenderung mendapat penilaian lebih tinggi dibandingkan tayangan dewasa.
+
+### Word Cloud Judul Film
+
+```{r}
+corpus <- Corpus(VectorSource(df_clean$Title))
+corpus <- tm_map(corpus, content_transformer(tolower))
+corpus <- tm_map(corpus, removePunctuation)
+corpus <- tm_map(corpus, removeNumbers)
+corpus <- tm_map(corpus, removeWords, stopwords("english"))
+
+dtm <- TermDocumentMatrix(corpus)
+m <- as.matrix(dtm)
+v <- sort(rowSums(m), decreasing = TRUE)
+df_words <- data.frame(word = names(v), freq = v)
+
+wordcloud(words = df_words$word, freq = df_words$freq,
+          min.freq = 2, max.words = 100,
+          random.order = FALSE, colors = brewer.pal(8, "Dark2"))
+```
+
+Interpretasi:
+
+Word cloud tersebut menggambarkan kata-kata yang paling sering muncul dalam judul tayangan atau film, dengan ukuran huruf yang lebih besar menunjukkan frekuensi kemunculan yang lebih tinggi. Terlihat bahwa kata "man" menjadi yang paling dominan, diikuti oleh kata-kata seperti "one", "last", "story", dan "part". Hal ini menunjukkan bahwa kata "man" sering digunakan dalam judul, yang dapat mencerminkan banyaknya tokoh sentral pria dalam film atau tayangan. Sebaliknya, semakin kecil ukuran tulisan suatu kata, maka semakin jarang kata tersebut muncul dalam judul, yang menunjukkan frekuensi penggunaannya relatif rendah dibandingkan kata-kata lain.
+
+### Pemetaan Kuadran (Popularitas dan Kualitas)
+
+```{r}
+library(ggplot2)
+library(ggrepel)
+library(dplyr)
+
+# Filter data bersih
+df_clean_filtered <- df_clean %>%
+  filter(!is.na(Rating), !is.na(VoteNumeric))
+
+# Hitung rata-rata rating dan vote
+avg_rating <- mean(df_clean_filtered$Rating, na.rm = TRUE)
+avg_vote <- mean(df_clean_filtered$VoteNumeric, na.rm = TRUE)
+
+# Ambil outlier: film dengan vote tinggi & rating rendah atau sebaliknya
+kontroversial <- df_clean_filtered %>%
+  mutate(
+    kategori = case_when(
+      Rating >= avg_rating & VoteNumeric < avg_vote ~ "Rating Tinggi, Vote Rendah",
+      Rating < avg_rating & VoteNumeric >= avg_vote ~ "Rating Rendah, Vote Tinggi",
+      Rating >= avg_rating & VoteNumeric >= avg_vote ~ "Disukai Banyak Orang",
+      TRUE ~ "Kurang Dikenal"
+    )
+  )
+
+# Plot
+ggplot(kontroversial, aes(x = Rating, y = VoteNumeric, color = kategori)) +
+  geom_point(alpha = 0.5, size = 2) +
+  geom_text_repel(
+    aes(label = Title),
+    size = 3.2,
+    max.overlaps = 20,
+    box.padding = 0.5
+  )+
+  geom_vline(xintercept = avg_rating, linetype = "dashed", color = "gray50") +
+  geom_hline(yintercept = avg_vote, linetype = "dashed", color = "gray50") +
+  scale_color_manual(values = c(
+    "Rating Tinggi, Vote Rendah" = "#0072B2",
+    "Rating Rendah, Vote Tinggi" = "#D55E00",
+    "Disukai Banyak Orang" = "#009E73",
+    "Kurang Dikenal" = "pink"
+  )) +
+  labs(
+    title = "Film Paling Kontroversial Berdasarkan Rating dan Jumlah Vote",
+    subtitle = "Garis putus-putus menunjukkan rata-rata rating dan vote",
+    x = "Rating",
+    y = "Jumlah Vote",
+    color = "Kategori"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold", size = 13),
+    plot.subtitle = element_text(size = 10),
+    legend.position = "bottom",
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 6)
+  )
+```
+
+Interpretasi:
+
+Grafik berjudul "Film Paling Kontroversial Berdasarkan Rating dan Jumlah Vote" menampilkan persebaran film berdasarkan dua variabel: rating (sumbu horizontal) dan jumlah vote (sumbu vertikal). Dua garis putus-putus menunjukkan rata-rata kedua variabel tersebut dan membagi grafik menjadi empat kuadran, yang merepresentasikan empat kategori film dengan warna berbeda. Kategori Disukai Banyak Orang (hijau kebiruan) berisi film dengan rating dan vote di atas rata-rata, seperti *Oppenheimer*, *Dune: Part One*, dan *Barbie* — menunjukkan film yang populer sekaligus berkualitas. Kurang Dikenal (pink) mencakup film dengan rating dan vote rendah, seperti *A Breed Apart*, yang menunjukkan minimnya eksposur dan penerimaan publik. Kategori Rating Rendah, Vote Tinggi (oranye) berisi film seperti *Snow White* yang meskipun banyak ditonton, mendapat penilaian buruk — mengindikasikan adanya kontroversi atau kekecewaan. Sebaliknya, Rating Tinggi, Vote Rendah (biru) mencakup film berkualitas namun kurang dikenal, berpotensi sebagai *hidden gems*. Secara keseluruhan, grafik ini membantu mengidentifikasi film-film yang menonjol karena kualitas, kontroversi, atau kurangnya eksposur, serta memberikan gambaran tentang bagaimana publik menilai dan merespons film secara luas.
+
+### Top Film dengan Rate Tertinggi per Kategori
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# Filter dan ambil film dengan rating tertinggi per kategori (tanpa NA)
+top_rating_per_category <- df_clean %>%
+  filter(!is.na(Category)) %>%
+  group_by(Category) %>%
+  slice_max(order_by = Rating, n = 1, with_ties = FALSE) %>%
+  ungroup()
+
+# Visualisasi lollipop chart dengan perbaikan teks tidak terpotong
+ggplot(top_rating_per_category, aes(x = Rating, y = reorder(Category, Rating), color = Category)) +
+  # Garis lollipop
+  geom_segment(aes(x = 0, xend = Rating, yend = reorder(Category, Rating)), size = 1.2) +
+  # Titik lollipop
+  geom_point(size = 6, show.legend = FALSE) +
+  # Nilai rating di kanan titik
+  geom_text(aes(label = round(Rating, 2)), hjust = -0.6, size = 3.5, fontface = "bold", color = "black") +
+  # Judul film di atas garis
+  geom_text(aes(x = Rating / 2, label = Title), 
+            vjust = -1.2, 
+            size = 3.5, 
+            fontface = "italic", 
+            color = "black") +
+  # Skala dan koordinat agar tidak terpotong
+  scale_x_continuous(limits = c(0, 10), expand = expansion(mult = c(0, 0.2))) +
+  coord_cartesian(clip = "off") +  # Ini penting agar teks di luar panel tetap terlihat
+  labs(
+    title = "Film dengan Rating Tertinggi per Kategori",
+    x = "Rating",
+    y = NULL
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.text.y = element_text(face = "bold"),
+    panel.grid.major.y = element_blank(),
+    plot.margin = margin(20, 30, 20, 20),  # Tambah margin kanan-kiri jika perlu
+    legend.position = "none"
+  )
+```
+
+Interpretasi:
+
+Secara umum, grafik ini menunjukkan bahwa kualitas film setidaknya berdasarkan rating tidak selalu berkorelasi langsung dengan tingkat klasifikasi usia. Film-film dari kategori yang tidak dinilai secara resmi seperti Not Rated justru mampu memperoleh rating tinggi, sementara kategori dengan pembatasan ketat seperti NC-17 justru menampilkan film dengan performa rendah. Visualisasi ini memberikan gambaran yang informatif mengenai bagaimana performa film terbaik dari setiap kategori sensor dalam hal penilaian oleh penonton.
+
+### Top Film dengan Vote Tertinggi per Kategori
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# Ambil film dengan vote tertinggi per kategori
+top_vote_per_category <- df_clean %>%
+  filter(!is.na(Category)) %>%
+  group_by(Category) %>%
+  slice_max(order_by = VoteNumeric, n = 1, with_ties = FALSE) %>%
+  ungroup()
+
+# Lollipop chart: Judul film di samping kanan titik
+ggplot(top_vote_per_category, aes(x = VoteNumeric, y = reorder(Category, VoteNumeric), color = Category)) +
+  geom_segment(aes(x = 0, xend = VoteNumeric, yend = reorder(Category, VoteNumeric)), size = 1.2) +
+  geom_point(size = 6, show.legend = FALSE) +
+  geom_text(aes(label = paste0(Title, " (", scales::comma(VoteNumeric), " votes)")),
+            hjust = 0,  # teks tepat di kanan titik
+            nudge_x = 30000,  # geser teks ke kanan dari titik
+            size = 3.5, fontface = "italic", color = "black") +
+  
+  # Skala diperluas di sisi kanan (misal, maksimum vote + margin)
+  scale_x_continuous(
+    limits = c(0, max(top_vote_per_category$VoteNumeric) * 1.2),
+    labels = scales::comma,
+    expand = c(0, 0)
+  ) +
+  coord_cartesian(clip = "off") +
+  
+  labs(
+    title = "Film dengan Jumlah Vote Tertinggi per Kategori",
+    x = "Jumlah Vote",
+    y = NULL
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.text.y = element_text(face = "bold"),
+    panel.grid.major.y = element_blank(),
+    plot.margin = margin(20, 100, 20, 20),  # Tambahkan margin kanan (kanan=100)
+    legend.position = "none"
+  )
+
+```
+
+Interpretasi:
+
+Grafik tersebut menunjukkan film dengan jumlah vote tertinggi pada setiap kategori usia. Terlihat bahwa kategori PG-13 dan R mendominasi dengan jumlah vote yang sangat tinggi, yaitu *Dune: Part One* (958.000 vote) dan *Oppenheimer* (893.000 vote). Sementara itu, kategori PG juga menonjol dengan *Spider-Man: Across the Spider-Verse* (457.000 vote). Sebaliknya, kategori seperti 16+, TV-PG, dan Unrated menunjukkan film dengan jumlah vote yang jauh lebih rendah, seperti *The Coffee Table* (10.000 vote) dan *Benedetta* (28.000 vote). Hal ini menunjukkan bahwa film dengan kategori usia yang lebih umum (seperti PG-13 dan R) cenderung memiliki jangkauan penonton lebih luas dan lebih populer dibandingkan kategori yang lebih terbatas.
+
+### TOP 3 Film dengan Rate Tertinggi per tahun
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(purrr)
+
+# Ambil top 3 film per tahun
+top3_per_year <- df_clean %>%
+  group_by(Year) %>%
+  slice_max(order_by = Rating, n = 3, with_ties = FALSE) %>%
+  ungroup()
+
+years <- sort(unique(top3_per_year$Year))
+
+# Tentukan manual warna (pastikan jumlah warna >= jumlah tahun)
+custom_colors <- c(
+  "#e74c3c",  # red
+  "#3498db",  # blue ocean
+  "#9b59b6",  # purple
+  "#fd79a8",  # pink
+  "#1abc9c",  # tosca
+  "#f39c12",  # tambahan jika tahun lebih dari 5
+  "#2ecc71"   # tambahan lain (hijau lembut)
+)
+
+# Mapping warna ke tahun
+colors_year <- setNames(custom_colors[1:length(years)], years)
+
+plot_per_year <- function(yr) {
+  data_year <- top3_per_year %>% filter(Year == yr)
+  col <- colors_year[as.character(yr)]  # warna khusus untuk tahun ini
+  
+  ggplot(data_year, aes(y = reorder(Title, Rating), x = Rating)) +
+    geom_segment(aes(x = 0, xend = Rating, yend = Title), color = col, linewidth = 0.8) +
+    geom_point(size = 5, color = col) +
+    geom_text(aes(x = Rating / 2, label = Title), vjust = -1.2, size = 6, fontface = "bold", color = col) +
+    geom_text(aes(label = round(Rating, 1)), hjust = -0.9, size = 5, color = "black", show.legend = FALSE) +
+    scale_x_continuous(expand = expansion(mult = c(0.1, 0.2))) +
+    labs(
+      title = paste(yr),
+      x = "Rating",
+      y = NULL
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      axis.text.y = element_blank(),
+      panel.grid.major.y = element_blank(),
+      plot.title = element_text(face = "bold", size = 17, hjust = 0.5),
+      legend.position = "none"
+    )
+}
+
+walk(years, ~print(plot_per_year(.x)))
+
+```
