@@ -31,7 +31,22 @@ Proyek ini merupakan bagian dari tugas akhir mata kuliah **Manajemen Basis Data*
 
 ---
 ## 🗃️ Struktur Repositori
-
+```         
+.
+├── Data_20202025.xlsx            
+├── Kelompok 2 Mongo DB.qmd           
+├── Kelompok 2 Mongo DB.html          
+├── Data-Driven Storytelling Analisis dan Visualisasi.pdf                  
+├── images
+│   ├── Rotten story front.png  
+│   ├── windi.png
+│   ├── jasmin.png
+│   ├── Qeis.png
+│   ├── Yekky.png
+│   ├── 2.png
+│   ├── 3.png
+└── README.md       # Dokumentasi utama proyek
+```
 ---
 
 ## 🧾 Deskripsi Dataset
