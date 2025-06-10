@@ -10,7 +10,7 @@
 ![MongoDB](https://img.shields.io/badge/Database-MongoDB-green)
 ![Status](https://img.shields.io/badge/Status-Completed-brightgreen)
 
-## 📚 Deskripsi Proyek
+## 📚 Deskripsi Project
 Proyek ini merupakan bagian dari tugas akhir mata kuliah **Manajemen Basis Data**. Kami melakukan **web scraping** dari situs [IMDb](https://www.imdb.com/) untuk memperoleh informasi film, kemudian menganalisis dan memvisualisasikan data tersebut secara interaktif menggunakan **R**, **MongoDB**, dan **Quarto**.
 
 ---
@@ -24,7 +24,7 @@ Proyek ini merupakan bagian dari tugas akhir mata kuliah **Manajemen Basis Data*
 ---
 ---
 
-## 👥 Tim Proyek
+## 👥 Tim Project
 | Nama                  | NIM                |
 |-----------------------|--------------------|
 | Dela Gustiara         | M0501241024        |
@@ -51,10 +51,9 @@ Dataset yang dikumpulkan dari IMDb berisi data film dengan variabel sebagai beri
 
 ![image](https://github.com/user-attachments/assets/f6f1e8b3-03a5-4285-bd49-9b49b26d0921)
 
-
 ---
 
-## 🛠 Teknologi & Tools
+## 🛠  Tools
 - **RStudio**
 - **MongoDB**
 
